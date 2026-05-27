@@ -7,7 +7,9 @@ This project studies model serving performance under heterogeneous system constr
 
 ## DIP v1: Role-Based Disaggregation (Ngrok / T4 Prototype)
 
-Initial experiments using a public tunneling layer (Ngrok) to route inference to a T4 edge worker exposed a severe batching inefficiency. Despite sustained request pressure, the worker GPU reached only ~40% SM utilization, while the A100 orchestrator remained idle. This indicates a network-induced batching breakdown (“drip-feed effect”), where jitter prevents stable decode/prefill aggregation.
+Initial experiments using a public tunneling layer (Ngrok) to route inference to a T4 edge worker exposed a severe batching inefficiency. Despite sustained request pressure, the worker GPU reached only ~40% SM utilization, while the A100 orchestrator remained idle. This indicates a network-induced batching breakdown (“drip-feed effect”), where jitter prevents stable decode/prefill aggregation. 
+
+Under identical workloads, the monolithic A100 achieved 477 tok/s at 123ms TTFT; the disaggregated topology collapsed to 32 tok/s at 1008ms — a 15x throughput drop driven entirely by network overhead.
 
 ### System Breakdown
 
@@ -30,12 +32,13 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
     * KV-cache transfer between prefill and decode stages (A100 clusters)  
 
 * **Role-Based Disaggregated Inference**
-    * Control-plane / data-plane separation for LLM serving 
-
-
-
-
-
+    * Control-plane / data-plane separation for LLM serving
+   
+* **Inference Engine Benchmarking (Engine comparison is evaluated under monolithic A100/H100 to isolate software gains from topology effects.
+)**
+    * vLLM (PagedAttention, dynamic memory allocation)
+    * SGLang (RadixAttention, prefix caching, KV reuse)
+    * TensorRT-LLM (AOT compilation, kernel fusion, FP8 — H100)
 
 # Monolithic (Coupled) Inference
 ### 1. Monolithic (A100) — Llama-3-8B-Instruct
