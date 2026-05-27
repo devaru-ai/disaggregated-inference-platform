@@ -1,10 +1,24 @@
-# DIP: Disaggregated Inference Platform
+# DIP v2: Disaggregated Inference Platform
 
 Different AI workloads have distinct hardware requirements aligned with their serving characteristics. Model performance optimization co-designs model execution and serving infrastructure around production constraints such as tail-latency targets (p95/p99), concurrency profiles, request burstiness, sequence length distributions, and hardware limits, while maintaining predictable, cost-efficient inference at scale.
 
 This project studies model serving performance under heterogeneous system constraints, focusing on how architecture and data movement strategies impact inference performance.
 
-### Evaluated Architectures
+
+## DIP v1: Role-Based Disaggregation (Ngrok / T4 Prototype)
+
+Initial experiments using a public tunneling layer (Ngrok) to route inference to a T4 edge worker exposed a severe batching inefficiency. Despite sustained request pressure, the worker GPU reached only ~40% SM utilization, while the A100 orchestrator remained idle. This indicates a network-induced batching breakdown (“drip-feed effect”), where jitter prevents stable decode/prefill aggregation.
+
+### System Breakdown
+
+| Architecture Role | Hardware | Test Batch Size | VRAM Allocation | SM Compute Peak | Primary Bottleneck |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Disaggregated Worker | T4 | 10 | 95% (14.2/15GB) | 40.0% | Host/Network bound (Ngrok jitter limits batching efficiency) |
+| Disaggregated Router | A100 | 10 | 0% (0/80GB) | 0.0% | Network-bound coordination (idle while awaiting worker responses) |
+
+This result motivated a redesign toward a strict control-plane / data-plane separation with explicit admission control and GPU backpressure handling.
+
+## DIP v2: Evaluated Architectures
 
 * **Monolithic (Coupled) Inference**
     * Distributed A100 clusters  
