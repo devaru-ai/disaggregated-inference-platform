@@ -1,5 +1,7 @@
 # DIP v2: Disaggregated Inference Platform
 
+**Building on NVIDIA Dynamo’s prefill–decode disaggregation model, DIP characterizes bottlenecks in KV-cache orchestration and heterogeneous hardware topologies, focusing on their impact on latency and throughput.**
+
 Different AI workloads have distinct hardware requirements aligned with their serving characteristics. Model performance optimization co-designs model execution and serving infrastructure around production constraints such as tail-latency targets (p95/p99), concurrency profiles, request burstiness, sequence length distributions, and hardware limits, while maintaining predictable, cost-efficient inference at scale.
 
 This project studies model serving performance under heterogeneous system constraints, focusing on how architecture and data movement strategies impact inference performance.
