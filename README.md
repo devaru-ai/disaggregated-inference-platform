@@ -15,8 +15,8 @@ This project studies model serving performance under heterogeneous system constr
     * KV-cache transfer between prefill and decode stages (H100 clusters)  
     * KV-cache transfer between prefill and decode stages (A100 clusters)  
 
-* **Hybrid Compute**
-    * CPU–GPU offloading architectures for memory-bound workloads  
+* **Role-Based Disaggregated Inference**
+    * Control-plane / data-plane separation for LLM serving 
 
 
 
@@ -49,3 +49,17 @@ Throughput improves with concurrency up to moderate batch sizes, after which it 
 | **512** | 8 | 21.16 | 377.20 | 108.21 |
 
 Throughput remains largely flat across concurrency, while TPOT and IPC transfer increase sharply with load and context size, indicating that inter-stage communication dominates system cost under scaling.
+
+# Role-Based Disaggregated Inference
+Admission-controlled routing with circuit breaking separates request intake from GPU execution, enforcing backpressure via semaphore and GPU admission gates to shed load under burst concurrency.
+
+| Total Requests | Successful (200) | Rejected (503) | Throughput (req/s) |
+|---------------:|-----------------:|---------------:|-------------------:|
+| 150            | 65               | 85              | 44.7              |
+
+Bursty high-concurrency inference workloads can cause GPU queues to grow unbounded, resulting in severe TTFT inflation, tail-latency amplification (P95), and starvation of long-running requests. 
+
+The hybrid role-based architecture mitigates this by enforcing admission control and circuit breaking, converting overload into early rejection rather than allowing cascading latency collapse. 
+
+This design prioritizes predictable latency and bounded GPU execution over unrestricted throughput, enabling stable serving behavior under sustained overload conditions.
+
