@@ -54,6 +54,25 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
 
 Throughput improves with concurrency up to moderate batch sizes, after which it saturates. This saturation coincides with steep increases in TTFT and P95 latency, indicating a transition into a queueing- and memory-pressure-dominated regime.
 
+### Hardware Saturation Sweep — Context Length vs. Concurrency
+![Monolithic A100 Llama-3 Benchmarks](plots/benchmark_graphs_Monolithic_A100_Meta-Llama-3-8B-Instruct.png)
+
+- **Throughput (top left):** Context length is a harder constraint than concurrency.
+  * At 512 tokens, throughput scales to ~976 tok/s and saturates cleanly.
+  * At 4096 it plateaus around 160 tok/s regardless of concurrency.
+  * At 8192 it collapses to near zero — the A100's 80GB VRAM is exhausted by KV cache allocation before meaningful batching can occur.
+- **TPOT (top right):**
+    * The 4096 context curve spikes sharply before concurrency 100 then flattens, indicating the GPU transitions into a memory-bound regime early.
+    * The 512 curve stays low and stable.
+    * The 8192 line is flat near zero because so few requests complete successfully.
+- **KV Cache utilization (bottom left):**
+    * At 8192 context, KV cache hits 100% by concurrency 64 and stays pinned.
+    * At 4096 it saturates by concurrency 128.
+    * At 512 it never exceeds ~18%, confirming the A100 is severely underutilized at short contexts, consistent with the 0.2% SM compute observed in v1.
+- **GPU utilization (bottom right):** 
+     * GPU utilization is highest at 512 context (~50%) and drops at 8192.
+     * This confirms the bottleneck is not compute but memory pressure, the GPU is stalling on KV cache reads rather than doing useful arithmetic.
+
 # Phase-Disaggregated Inference
 ### 1. KV-cache transfer between prefill and decode stages (A100 clusters) — Llama-3-8B-Instruct 
 | Context | Concurrency | Throughput (tok/s) | TPOT (ms/tok) | IPC Transfer (ms) |
