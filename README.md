@@ -43,50 +43,130 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
     * TensorRT-LLM (AOT compilation, kernel fusion, FP8 — H100)
 
 # Monolithic (Coupled) Inference
-### 1. Monolithic (A100) — Llama-3-8B-Instruct
+
+**Table 1: Monolithic (A100) — Llama-3-8B-Instruct**
+
 | Context | Concurrency | TTFT (ms) | TPOT (ms/tok) | Throughput (tok/s) | P95 (ms) | KV Util (%) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **512** | 8 | 501 | 17.9 | 345 | 502 | 1.44 |
-| **512** | 32 | 1333 | 28.9 | 742 | 1794 | 5.67 |
-| **512** | 64 | 2829 | 42.1 | 882 | 3527 | 11.34 |
-| **512** | 128 | 4004 | 58.9 | 902 | 10640 | 17.72 |
-| **512** | 256 | 11315 | 56.5 | 976 | 20874 | 18.05 |
+|---|---|---|---|---|---|---|
+| 512 | 8 | 501 | 17.9 | 345 | 502 | 1.44 |
+| 512 | 128 | 4004 | 58.9 | 902 | 10640 | 17.72 |
+| 512 | 512 | 22527 | 58.9 | 969 | 41968 | 18.05 |
+| 4096 | 8 | 2444 | 38.1 | 124 | 3672 | 9.79 |
+| 4096 | 64 | 16108 | 231 | 158 | 29088 | 78.51 |
+| 4096 | 128 | 32134 | 262 | 159 | 66509 | 99.64 |
+| 8192 | 8 | 4505 | 0 | 0.75 | 7587 | 19.39 |
+| 8192 | 64 | 33371 | 0 | 0.84 | 68795 | 99.49 |
 
-Throughput improves with concurrency up to moderate batch sizes, after which it saturates. This saturation coincides with steep increases in TTFT and P95 latency, indicating a transition into a queueing- and memory-pressure-dominated regime.
+- At 512 context, throughput scales from 345 to 969 tok/s with concurrency, while TPOT rises gradually and KV utilization remains below 18%, indicating the system is compute- and batching-efficient with significant memory headroom.
 
-### Hardware Saturation Sweep — Context Length vs. Concurrency
-![Monolithic A100 Llama-3 Benchmarks](plots/benchmark_graphs_Monolithic_A100_Meta-Llama-3-8B-Instruct.png)
+- At 4096 context, throughput saturates at ~158 tok/s by concurrency 64 and KV utilization reaches 99.64% by concurrency 128. Beyond this point, additional concurrency no longer improves throughput, indicating a transition into a KV-memory–bound regime.
 
-- **Throughput (top left):** Context length is a harder constraint than concurrency.
-  * At 512 tokens, throughput scales to ~976 tok/s and saturates cleanly.
-  * At 4096 it plateaus around 160 tok/s regardless of concurrency.
-  * At 8192 it collapses to near zero — the A100's 80GB VRAM is exhausted by KV cache allocation before meaningful batching can occur.
-- **TPOT (top right):**
-    * The 4096 context curve spikes sharply before concurrency 100 then flattens, indicating the GPU transitions into a memory-bound regime early.
-    * The 512 curve stays low and stable.
-    * The 8192 line is flat near zero because so few requests complete successfully.
-- **KV Cache utilization (bottom left):**
-    * At 8192 context, KV cache hits 100% by concurrency 64 and stays pinned.
-    * At 4096 it saturates by concurrency 128.
-    * At 512 it never exceeds ~18%, confirming the A100 is severely underutilized at short contexts, consistent with the 0.2% SM compute observed in v1.
-- **GPU utilization (bottom right):** 
-     * GPU utilization is highest at 512 context (~50%) and drops at 8192.
-     * This confirms the bottleneck is not compute but memory pressure, the GPU is stalling on KV cache reads rather than doing useful arithmetic.
+- At 8192 context, throughput collapses to <1 tok/s with near-zero effective completion rate. The system becomes fully constrained by KV cache capacity, making context length the dominant limiting factor over concurrency.
+
+### Hardware Saturation Sweep 
+![Monolithic A100 Llama-3 Benchmarks](plots/report_Monolithic_A100_Meta-Llama-3-8B-Instruct-1.png)
+
+**Throughput (top left):** 
+- At 512 tokens, throughput scales continuously to ~1300 tok/s through concurrency 512, the A100 is not saturated at short contexts and keeps absorbing load.
+- At 4096, throughput plateaus around 240 tok/s by concurrency 64 and stops scaling entirely.
+- At 8192, throughput collapses to ~100 tok/s from the first sweep, indicating immediate KV capacity exhaustion and loss of batching efficiency.
+
+**TPOT (top right):** 
+- The 4096 curve spikes to ~230ms by concurrency 64 and then stabilizes, marking a clear transition into a memory-bound regime.
+- The 512 curve remains below 60ms throughout.
+- At 8192, latency stabilizes immediately at ~120ms, indicating execution is dominated by memory stalls rather than compute.
+
+**KV Cache (bottom left):** 
+- At 8192, KV cache hits 100% by concurrency 64 and stays pinned for the entire sweep.
+- At 4096 it saturates by concurrency 128.
+- At 512 it never exceeds ~18%, confirming significant unused VRAM headroom at short contexts, the GPU has memory to spare but no batching pressure to fill it.
+
+**GPU Utilization (bottom right):** 
+- Utilization climbs with both context length and concurrency, reaching 95%+ at 8192 by concurrency 128.
+- Counterintuitively, the highest utilization occurs at long contexts despite lower throughput — the GPU is not idle, it is stalled on KV cache memory reads rather than doing useful compute.
+- At 512 context utilization stays around 50% even at concurrency 512.
+
+**Table 2: Monolithic (A100) — Qwen1.5-14B-Chat**
+
+| Context | Concurrency | TTFT (ms) | TPOT (ms/tok) | Throughput (tok/s) | P95 (ms) | KV Util (%) |
+|---|---|---|---|---|---|---|
+| 512 | 8 | 474 | 35.2 | 205 | 475 | 4.80 |
+| 512 | 128 | 3909 | 84.9 | 727 | 17235 | 60.02 |
+| 512 | 512 | 34866 | 86.4 | 926 | 61511 | 60.02 |
+| 4096 | 8 | 3224 | 67.6 | 84 | 5096 | 46.76 |
+| 4096 | 32 | 8951 | 86.2 | 126 | 24985 | 99.37 |
+| 8192 | 8 | 6585 | 88.8 | 56 | 10007 | 96.66 |
+| 16384 | 8 | 15305 | 85.2 | 29 | 26992 | 98.33 |
+| 16384 | 128 | 140082 | 76.3 | 27 | 267948 | 98.33 |
+
+- At 512 context, throughput scales up to 926 tok/s, while KV utilization remains below saturation even at high concurrency, indicating residual batching capacity despite higher per-token memory cost.
+
+- At 4096 context, KV cache saturates at ~99% by concurrency 32, significantly earlier than Llama-3-8B, reflecting higher memory pressure from larger attention heads. Throughput becomes insensitive to additional concurrency, indicating early transition into a memory-bound regime.
+
+- At 8192 and 16384 context, throughput stabilizes at ~27–29 tok/s regardless of concurrency, indicating full saturation of both KV capacity and memory bandwidth. At this scale, a single A100 is structurally insufficient for meaningful throughput, requiring either tensor parallelism or multi-GPU offloading.
+
+### Hardware Saturation Sweep 
+![Monolithic A100 Qwen-1.5 Benchmarks](plots/report_Monolithic_A100_Qwen1_5-14B-Chat-2.png)
+
+**Throughput (top left):** 
+- At 512 tokens, throughput scales to ~920 tok/s by concurrency 512 — lower ceiling than Llama 8B, reflecting the larger model's memory bandwidth cost per forward pass.
+- At 4096 it plateaus around 130 tok/s from concurrency 64.
+- At 8192 and 16384 throughput is effectively flat from the first sweep at ~50 tok/s and ~30 tok/s respectively — the model leaves so little VRAM headroom that batching never gets off the ground at long contexts.
+
+**TPOT (top right):** 
+- All context lengths converge to a narrow 75–92ms band almost immediately, with minimal degradation as concurrency scales to 512.
+- This is a distinct pattern from Llama — rather than a sharp spike and plateau, Qwen hits its memory bandwidth ceiling at very low concurrency and stays there.
+- The system is saturated from the first sweep across all context lengths above 512.
+
+**KV Cache (bottom left):** 
+- KV cache pressure is near 95–100% from concurrency 8 across all context lengths beyond 512.
+- At 512 context it reaches 60% by concurrency 128 — still substantially higher than Llama 8B at the same load, reflecting the larger model's reduced VRAM headroom.
+- The 16384 context curve pins at 98% from the very first sweep.
+
+**GPU Utilization (bottom right):** 
+- GPU utilization stays above 80% across all sweeps and all context lengths, including at concurrency 8.
+- Unlike Llama 8B where utilization climbs with load, Qwen 14B saturates the A100's compute from the lightest workloads.
+- The larger weight matrices alone are sufficient to keep the GPU occupied regardless of batch size. This model is compute-saturating the A100 relative to the Llama-8B model.
 
 # Phase-Disaggregated Inference
-### 1. KV-cache transfer between prefill and decode stages (A100 clusters) — Llama-3-8B-Instruct 
+### 1. KV-cache transfer between prefill and decode stages (A100 clusters)
+
+#### Llama-3-8B-Instruct
+
 | Context | Concurrency | Throughput (tok/s) | TPOT (ms/tok) | IPC Transfer (ms) |
 | :--- | :--- | :--- | :--- | :--- |
-| **128** | 1 | 16.93 | 59.06 | 11.45 |
-| **128** | 2 | 28.20 | 70.91 | 7.28 |
-| **128** | 4 | 21.86 | 182.48 | 20.68 |
-| **128** | 8 | 22.25 | 358.80 | 46.64 |
-| **512** | 1 | 19.09 | 52.39 | 19.63 |
-| **512** | 2 | 21.42 | 92.89 | 23.70 |
-| **512** | 4 | 19.25 | 207.64 | 51.68 |
-| **512** | 8 | 21.16 | 377.20 | 108.21 |
+| **128** | 1 | 10.73 | 93.21 | 10.26 |
+| **128** | 2 | 19.66 | 101.50 | 8.58 |
+| **128** | 4 | 23.52 | 169.60 | 17.75 |
+| **128** | 8 | 21.90 | 364.15 | 58.34 |
+| **512** | 1 | 11.32 | 88.35 | 21.22 |
+| **512** | 4 | 22.01 | 181.39 | 43.24 |
+| **512** | 8 | 20.13 | 396.49 | 162.89 |
+| **1024** | 1 | 10.60 | 94.33 | 34.56 |
+| **1024** | 8 | 18.74 | 425.67 | 307.18 |
+| **2048** | 1 | 9.38 | 106.65 | 65.41 |
+| **2048** | 8 | 15.50 | 515.18 | 511.27 |
 
-Throughput remains largely flat across concurrency, while TPOT and IPC transfer increase sharply with load and context size, indicating that inter-stage communication dominates system cost under scaling.
+#### Qwen1.5-14B-Chat
+
+| Context | Concurrency | Throughput (tok/s) | TPOT (ms/tok) | IPC Transfer (ms) |
+| :--- | :--- | :--- | :--- | :--- |
+| **128** | 1 | 10.73 | 93.23 | 11.16 |
+| **128** | 2 | 21.48 | 93.10 | 6.29 |
+| **128** | 4 | 24.42 | 163.66 | 18.57 |
+| **128** | 8 | 21.83 | 365.43 | 45.70 |
+| **512** | 1 | 11.71 | 85.40 | 18.33 |
+| **512** | 4 | 22.65 | 175.87 | 51.33 |
+| **512** | 8 | 20.34 | 392.74 | 114.99 |
+| **1024** | 1 | 10.85 | 92.19 | 34.90 |
+| **1024** | 8 | 18.31 | 435.79 | 342.50 |
+| **2048** | 1 | 9.25 | 108.09 | 68.67 |
+| **2048** | 8 | 15.65 | 510.40 | 565.55 |
+
+- Throughput is flat across both models and all context lengths — adding concurrency does not improve output rate, confirming that inter-stage KV transfer is the bottleneck.
+-  TPOT scales sharply with concurrency regardless of model size: both Llama 8B and Qwen 14B degrade from ~93ms at concurrency 1 to ~510ms at concurrency 8, suggesting the transfer layer saturates at the same rate independent of model weight.
+-  At 2048 context, concurrency 8: IPC transfer cost equals or exceeds TPOT (511ms vs 515ms for Llama, 565ms vs 510ms for Qwen) — the system is spending as much time moving KV state between GPUs as it is generating tokens.
+-  At this point, system performance is primarily constrained by interconnect bandwidth, and further compute-side optimization yields negligible latency gains without improving the transfer layer.
 
 # Role-Based Disaggregated Inference
 Admission-controlled routing with circuit breaking separates request intake from GPU execution, enforcing backpressure via semaphore and GPU admission gates to shed load under burst concurrency.
