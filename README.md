@@ -6,45 +6,69 @@ Different AI workloads have distinct hardware requirements aligned with their se
 
 This project studies model serving performance under heterogeneous system constraints, focusing on how architecture and data movement strategies impact inference performance.
 
+# Key Findings
 
-## DIP v1: Role-Based Disaggregation (Ngrok / T4 Prototype)
+### 1. Long-context performance depends heavily on the serving engine
+At 8192-token prompts and 128 concurrent requests, vLLM nearly stopped making progress while SGLang maintained high throughput.
+- vLLM: 0.85 tok/s, 73s TTFT, 137s P95
+- SGLang: 1,426 tok/s, 2.0s TTFT, 8.3s P95
+This resulted in a ~1,676× throughput difference on identical hardware.
 
-Initial experiments using a public tunneling layer (Ngrok) to route inference to a T4 edge worker exposed a severe batching inefficiency. Despite sustained request pressure, the worker GPU reached only ~40% SM utilization, while the A100 orchestrator remained idle. This indicates a network-induced batching breakdown (“drip-feed effect”), where jitter prevents stable decode/prefill aggregation. 
+### 2. Moving KV cache can become as expensive as generating tokens
+In phase-disaggregated inference, the system eventually spends as much time transferring KV cache between GPUs as it spends generating new tokens.
+At 2048-token context and concurrency 8:
+- Token generation: ~515 ms/token
+- KV transfer: ~511–566 ms
+Once transfer time matches compute time, faster kernels or GPUs provide limited benefit unless the interconnect layer is improved.
 
-Under identical workloads, the monolithic A100 achieved 477 tok/s at 123ms TTFT; the disaggregated topology collapsed to 32 tok/s at 1008ms — a 15x throughput drop driven entirely by network overhead.
+### 3. Long prompts exhaust GPU memory faster than additional users
+Increasing concurrency improves throughput only up to a point. Long contexts are a much stronger scaling constraint because they rapidly consume KV-cache memory.
+On a single A100:
+- Throughput remained healthy at 512-token contexts
+- Performance degraded sharply at 4096 tokens
+- At 8192 tokens, throughput collapsed to <1 tok/s
+This indicates that KV-cache capacity, rather than concurrency, becomes the dominant bottleneck for long-context serving.
 
-### System Breakdown
+## Evaluated Architectures
+ 
+- **Monolithic (Coupled) Inference:** Distributed A100 and H100 clusters
+- **Inference Engine Comparison:**  vLLM vs SGLang vs TensorRT-LLM (isolated on monolithic A100/H100 to separate software gains from topology effects)
+- **Phase-Disaggregated Inference:** KV-cache transfer benchmarks on A100 and H100 clusters
+- **Role-Based Disaggregated Inference:** Control-plane / data-plane separation with admission control and circuit breaking
+  
+# 1. Inference Engine Comparison 
+### 1. vLLM vs SGLang (A100, Llama-3-8B-Instruct)
+*Monolithic A100, same hardware and model. Engine is the only variable.*
 
-| Architecture Role | Hardware | Test Batch Size | VRAM Allocation | SM Compute Peak | Primary Bottleneck |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| Disaggregated Worker | T4 | 10 | 95% (14.2/15GB) | 40.0% | Host/Network bound (Ngrok jitter limits batching efficiency) |
-| Disaggregated Router | A100 | 10 | 0% (0/80GB) | 0.0% | Network-bound coordination (idle while awaiting worker responses) |
+| Engine | Context | Concurrency | TTFT (ms) | TPOT (ms/tok) | Throughput (tok/s) | P95 (ms) |
+|---|---|---|---|---|---|---|
+| vLLM | 512 | 8 | 501 | 17.9 | 345 | 502 |
+| SGLang | 512 | 8 | 83 | 19.7 | 394 | 83 |
+| vLLM | 512 | 128 | 4004 | 58.9 | 902 | 10640 |
+| SGLang | 512 | 128 | 298 | 29.8 | 2172 | 4211 |
+| vLLM | 4096 | 8 | 2444 | 38.1 | 124 | 3672 |
+| SGLang | 4096 | 8 | 131 | 20.9 | 367 | 157 |
+| vLLM | 4096 | 128 | 32134 | 262 | 159 | 66509 |
+| SGLang | 4096 | 128 | 1081 | 32.1 | 1989 | 5363 |
+| vLLM | 8192 | 8 | 4505 | 0 | 0.75 | 7587 |
+| SGLang | 8192 | 8 | 219 | 20.3 | 365 | 268 |
+| vLLM | 8192 | 128 | 73174 | 0 | 0.85 | 136792 |
+| SGLang | 8192 | 128 | 2039 | 45.1 | 1426 | 8259 |
 
-This result motivated a redesign toward a strict control-plane / data-plane separation with explicit admission control and GPU backpressure handling.
+**Analysis**
 
-## DIP v2: Evaluated Architectures
+- At short contexts (512 tokens), both engines deliver comparable single-request performance, but SGLang achieves substantially lower TTFT and higher aggregate throughput as concurrency increases.
 
-* **Monolithic (Coupled) Inference**
-    * Distributed A100 clusters  
-    * Distributed H100 clusters  
+- The performance gap widens dramatically as context length grows. At 4096-token prompts and concurrency 128, SGLang delivers 1989 tok/s versus 159 tok/s for vLLM while reducing TTFT from 32.1 s to 1.1 s.
 
-* **Phase-Disaggregated Inference**
-    * A100–H100 split execution (prefill and decode separation)  
-    * KV-cache transfer between prefill and decode stages (H100 clusters)  
-    * KV-cache transfer between prefill and decode stages (A100 clusters)  
+- The largest performance gap appears **at 8192-token context and concurrency 128. vLLM throughput collapses to 0.85 tok/s with 73 s TTFT and 137 s P95 latency, while SGLang maintains 1426 tok/s with 2.0 s TTFT and 8.3 s P95 latency, a ~1676× throughput advantage on identical hardware.**
 
-* **Role-Based Disaggregated Inference**
-    * Control-plane / data-plane separation for LLM serving
-   
-* **Inference Engine Benchmarking (Engine comparison is evaluated under monolithic A100/H100 to isolate software gains from topology effects.
-)**
-    * vLLM (PagedAttention, dynamic memory allocation)
-    * SGLang (RadixAttention, prefix caching, KV reuse)
-    * TensorRT-LLM (AOT compilation, kernel fusion, FP8 — H100)
+- The results suggest vLLM becomes KV-memory constrained at long contexts, with KV-cache utilization approaching saturation (~99%) between 4096 and 8192 tokens. SGLang maintains high throughput under the same workload, indicating significantly more efficient long-context serving on identical hardware.
 
-# Monolithic (Coupled) Inference
+# 2. Monolithic (Coupled) Inference
 
 **Table 1: Monolithic (A100) — Llama-3-8B-Instruct**
+- *Llama-3-8B transitions from compute-efficient to KV-memory-bound as context length increases, with throughput collapsing once KV utilization approaches saturation.*
 
 | Context | Concurrency | TTFT (ms) | TPOT (ms/tok) | Throughput (tok/s) | P95 (ms) | KV Util (%) |
 |---|---|---|---|---|---|---|
@@ -61,20 +85,20 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
 
 - At 4096 context, throughput saturates at ~158 tok/s by concurrency 64 and KV utilization reaches 99.64% by concurrency 128. Beyond this point, additional concurrency no longer improves throughput, indicating a transition into a KV-memory–bound state.
 
-- At 8192 context, throughput collapses to <1 tok/s with near-zero effective completion rate. The system becomes fully constrained by KV cache capacity, making context length the dominant limiting factor over concurrency.
-
+- At 8192 context, throughput collapses to <1 tok/s and becomes effectively insensitive to additional concurrency. KV-cache capacity emerges as the dominant bottleneck.
+  
 ### Hardware Saturation Sweep 
 ![Monolithic A100 Llama-3 Benchmarks](plots/report_Monolithic_A100_Meta-Llama-3-8B-Instruct-1.png)
 
 **Throughput (top left):** 
 - At 512 tokens, throughput scales continuously to ~1300 tok/s through concurrency 512, the A100 is not saturated at short contexts and keeps absorbing load.
 - At 4096, throughput plateaus around 240 tok/s by concurrency 64 and stops scaling entirely.
-- At 8192, throughput collapses to ~100 tok/s from the first sweep, indicating immediate KV capacity exhaustion and loss of batching efficiency.
+- At 8192, throughput collapses to ~100 tok/s from the first sweep, suggesting the workload reaches KV-cache limits almost immediately, leaving little opportunity for batching gains.
 
 **TPOT (top right):** 
 - The 4096 curve spikes to ~230ms by concurrency 64 and then stabilizes, marking a clear transition into a memory-bound state.
 - The 512 curve remains below 60ms throughout.
-- At 8192, latency stabilizes immediately at ~120ms, indicating execution is dominated by memory stalls rather than compute.
+- At 8192, latency stabilizes immediately at ~120ms, indicating the workload is increasingly memory-bound rather than compute-bound.
 
 **KV Cache (bottom left):** 
 - At 8192, KV cache hits 100% by concurrency 64 and stays pinned for the entire sweep.
@@ -87,7 +111,8 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
 - At 512 context utilization stays around 50% even at concurrency 512.
 
 **Table 2: Monolithic (A100) — Qwen1.5-14B-Chat**
-
+- *Qwen-14B reaches memory pressure much earlier than Llama-3-8B, causing throughput to plateau at relatively low concurrency and long contexts.*
+  
 | Context | Concurrency | TTFT (ms) | TPOT (ms/tok) | Throughput (tok/s) | P95 (ms) | KV Util (%) |
 |---|---|---|---|---|---|---|
 | 512 | 8 | 474 | 35.2 | 205 | 475 | 4.80 |
@@ -125,11 +150,11 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
 
 **GPU Utilization (bottom right):** 
 - GPU utilization stays above 80% across all sweeps and all context lengths, including at concurrency 8.
-- Unlike Llama 8B where utilization climbs with load, Qwen 14B saturates the A100's compute from the lightest workloads.
-- The larger weight matrices alone are sufficient to keep the GPU occupied regardless of batch size. This model is compute-saturating the A100 relative to the Llama-8B model.
+- Unlike Llama 8B where utilization climbs with load, Qwen 14B keeps GPU utilization above 80% even at low concurrency, indicating substantially higher baseline hardware pressure than Llama-3-8B.
+- The larger model leaves less headroom for batching and reaches resource limits much earlier than the 8B model.
 
-# Phase-Disaggregated Inference
-### 1. KV-cache transfer between prefill and decode stages (A100 clusters)
+# 3. Phase-Disaggregated Inference
+### 1. KV-cache transfer between prefill and decode stages (A100 clusters, NVLink-connected GPU pairs with CUDA peer-to-peer communication)
 
 #### Llama-3-8B-Instruct
 
@@ -163,12 +188,12 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
 | **2048** | 1 | 9.25 | 108.09 | 68.67 |
 | **2048** | 8 | 15.65 | 510.40 | 565.55 |
 
-- Throughput is flat across both models and all context lengths — adding concurrency does not improve output rate, confirming that inter-stage KV transfer is the bottleneck.
--  TPOT scales sharply with concurrency regardless of model size: both Llama 8B and Qwen 14B degrade from ~93ms at concurrency 1 to ~510ms at concurrency 8, suggesting the transfer layer saturates at the same rate independent of model weight.
--  At 2048 context, concurrency 8: IPC transfer cost equals or exceeds TPOT (511ms vs 515ms for Llama, 565ms vs 510ms for Qwen) — the system is spending as much time moving KV cache between GPUs as it is generating tokens.
--  At this point, system performance is primarily constrained by interconnect bandwidth, and further compute-side optimization yields negligible latency gains without improving the transfer layer.
+- Throughput is largely flat across both models and context lengths, increasing concurrency does not improve output rate, suggesting that inter-stage KV transfer is the dominant bottleneck.
+- TPOT increases sharply with concurrency for both models, rising from ~93ms to ~510ms, suggesting that the transfer layer becomes saturated under higher concurrency, largely independent of model size.
+- At 2048 context and concurrency 8, IPC transfer time becomes comparable to TPOT (511ms vs 515ms for Llama, 565ms vs 510ms for Qwen), indicating that KV movement cost is approaching the cost of token generation.
+-  At this point, system performance becomes increasingly constrained by interconnect overhead, and further compute-side optimization yields diminishing returns unless the transfer layer is improved.
 
-# Role-Based Disaggregated Inference
+# 4. Role-Based Disaggregated Inference
 Admission-controlled routing with circuit breaking separates request intake from GPU execution, enforcing backpressure via semaphore and GPU admission gates to shed load under burst concurrency.
 
 | Total Requests | Successful (200) | Rejected (503) | Throughput (req/s) |
@@ -181,31 +206,15 @@ The hybrid role-based architecture mitigates this by enforcing admission control
 
 This design prioritizes predictable latency and bounded GPU execution over unrestricted throughput, enabling stable serving behavior under sustained overload conditions.
 
-# Inference Engine Comparison 
-### 1. vLLM vs SGLang (A100, Llama-3-8B-Instruct)
-*Monolithic A100, same hardware and model. Engine is the only variable.*
+## Appendix: DIP v1 — Role-Based Disaggregation (Ngrok / T4 Prototype)
+ 
+Initial experiments using a public tunneling layer (Ngrok) to route inference to a T4 edge worker revealed batching inefficiencies under network jitter. Despite sustained request pressure, the worker GPU reached only ~40% SM utilization, while the A100 orchestrator was largely idle — a network-induced batching breakdown (drip-feed effect) where jitter prevents stable decode/prefill aggregation.
 
-| Engine | Context | Concurrency | TTFT (ms) | TPOT (ms/tok) | Throughput (tok/s) | P95 (ms) |
-|---|---|---|---|---|---|---|
-| vLLM | 512 | 8 | 501 | 17.9 | 345 | 502 |
-| SGLang | 512 | 8 | 83 | 19.7 | 394 | 83 |
-| vLLM | 512 | 128 | 4004 | 58.9 | 902 | 10640 |
-| SGLang | 512 | 128 | 298 | 29.8 | 2172 | 4211 |
-| vLLM | 4096 | 8 | 2444 | 38.1 | 124 | 3672 |
-| SGLang | 4096 | 8 | 131 | 20.9 | 367 | 157 |
-| vLLM | 4096 | 128 | 32134 | 262 | 159 | 66509 |
-| SGLang | 4096 | 128 | 1081 | 32.1 | 1989 | 5363 |
-| vLLM | 8192 | 8 | 4505 | 0 | 0.75 | 7587 |
-| SGLang | 8192 | 8 | 219 | 20.3 | 365 | 268 |
-| vLLM | 8192 | 128 | 73174 | 0 | 0.85 | 136792 |
-| SGLang | 8192 | 128 | 2039 | 45.1 | 1426 | 8259 |
-
-**Core Findings**
-
-- At short contexts (512 tokens), both engines deliver comparable single-request performance, but SGLang achieves substantially lower TTFT and higher aggregate throughput as concurrency increases.
-
-- The performance gap widens dramatically as context length grows. At 4096-token prompts and concurrency 128, SGLang delivers 1989 tok/s versus 159 tok/s for vLLM while reducing TTFT from 32.1 s to 1.1 s.
-
-- The most significant result appears **at 8192-token context length.** **Under concurrency 128, vLLM throughput falls to 0.85 tok/s with 73 s TTFT and 137 s P95 latency, whereas SGLang maintains 1426 tok/s with 2.0 s TTFT and 8.3 s P95 latency.**
-
-- The data suggests vLLM becomes KV-memory constrained at long contexts, reaching ~99% KV cache utilization by 4096–8192 tokens. SGLang continues to scale under the same workload, indicating substantially more efficient long-context serving behavior on a single A100.
+Under identical workloads, the monolithic A100 achieved 477 tok/s at 123 ms TTFT, whereas the disaggregated topology collapsed to 32 tok/s at 1008 ms — a ~15× throughput drop primarily driven by network overhead.
+ 
+| Architecture Role | Hardware | Test Batch Size | VRAM Allocation | SM Compute Peak | Primary Bottleneck |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Disaggregated Worker | T4 | 10 | 95% (14.2/15GB) | 40.0% | Host/network-bound (batching disrupted by network jitter) |
+| Disaggregated Router | A100 | 10 | 0% (0/80GB) | 0.0% | Network-bound coordination (idle while awaiting worker responses) |
+ 
+This result motivated a redesign toward strict control-plane / data-plane separation, introducing explicit admission control and GPU backpressure handling in DIP v2.
