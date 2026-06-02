@@ -59,7 +59,7 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
 
 - At 512 context, throughput scales from 345 to 969 tok/s with concurrency, while TPOT rises gradually and KV utilization remains below 18%, indicating the system is compute- and batching-efficient with significant memory headroom.
 
-- At 4096 context, throughput saturates at ~158 tok/s by concurrency 64 and KV utilization reaches 99.64% by concurrency 128. Beyond this point, additional concurrency no longer improves throughput, indicating a transition into a KV-memory–bound regime.
+- At 4096 context, throughput saturates at ~158 tok/s by concurrency 64 and KV utilization reaches 99.64% by concurrency 128. Beyond this point, additional concurrency no longer improves throughput, indicating a transition into a KV-memory–bound state.
 
 - At 8192 context, throughput collapses to <1 tok/s with near-zero effective completion rate. The system becomes fully constrained by KV cache capacity, making context length the dominant limiting factor over concurrency.
 
@@ -72,7 +72,7 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
 - At 8192, throughput collapses to ~100 tok/s from the first sweep, indicating immediate KV capacity exhaustion and loss of batching efficiency.
 
 **TPOT (top right):** 
-- The 4096 curve spikes to ~230ms by concurrency 64 and then stabilizes, marking a clear transition into a memory-bound regime.
+- The 4096 curve spikes to ~230ms by concurrency 64 and then stabilizes, marking a clear transition into a memory-bound state.
 - The 512 curve remains below 60ms throughout.
 - At 8192, latency stabilizes immediately at ~120ms, indicating execution is dominated by memory stalls rather than compute.
 
@@ -101,7 +101,7 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
 
 - At 512 context, throughput scales up to 926 tok/s, while KV utilization remains below saturation even at high concurrency, indicating residual batching capacity despite higher per-token memory cost.
 
-- At 4096 context, KV cache saturates at ~99% by concurrency 32, significantly earlier than Llama-3-8B, reflecting higher memory pressure from larger attention heads. Throughput becomes insensitive to additional concurrency, indicating early transition into a memory-bound regime.
+- At 4096 context, KV cache saturates at ~99% by concurrency 32, significantly earlier than Llama-3-8B, reflecting higher memory pressure from larger attention heads. Throughput becomes insensitive to additional concurrency, indicating early transition into a memory-bound state.
 
 - At 8192 and 16384 context, throughput stabilizes at ~27–29 tok/s regardless of concurrency, indicating full saturation of both KV capacity and memory bandwidth. At this scale, a single A100 is structurally insufficient for meaningful throughput, requiring either tensor parallelism or multi-GPU offloading.
 
@@ -165,7 +165,7 @@ This result motivated a redesign toward a strict control-plane / data-plane sepa
 
 - Throughput is flat across both models and all context lengths — adding concurrency does not improve output rate, confirming that inter-stage KV transfer is the bottleneck.
 -  TPOT scales sharply with concurrency regardless of model size: both Llama 8B and Qwen 14B degrade from ~93ms at concurrency 1 to ~510ms at concurrency 8, suggesting the transfer layer saturates at the same rate independent of model weight.
--  At 2048 context, concurrency 8: IPC transfer cost equals or exceeds TPOT (511ms vs 515ms for Llama, 565ms vs 510ms for Qwen) — the system is spending as much time moving KV state between GPUs as it is generating tokens.
+-  At 2048 context, concurrency 8: IPC transfer cost equals or exceeds TPOT (511ms vs 515ms for Llama, 565ms vs 510ms for Qwen) — the system is spending as much time moving KV cache between GPUs as it is generating tokens.
 -  At this point, system performance is primarily constrained by interconnect bandwidth, and further compute-side optimization yields negligible latency gains without improving the transfer layer.
 
 # Role-Based Disaggregated Inference
@@ -181,3 +181,31 @@ The hybrid role-based architecture mitigates this by enforcing admission control
 
 This design prioritizes predictable latency and bounded GPU execution over unrestricted throughput, enabling stable serving behavior under sustained overload conditions.
 
+# Inference Engine Comparison 
+### 1. vLLM vs SGLang (A100, Llama-3-8B-Instruct)
+*Monolithic A100, same hardware and model. Engine is the only variable.*
+
+| Engine | Context | Concurrency | TTFT (ms) | TPOT (ms/tok) | Throughput (tok/s) | P95 (ms) |
+|---|---|---|---|---|---|---|
+| vLLM | 512 | 8 | 501 | 17.9 | 345 | 502 |
+| SGLang | 512 | 8 | 83 | 19.7 | 394 | 83 |
+| vLLM | 512 | 128 | 4004 | 58.9 | 902 | 10640 |
+| SGLang | 512 | 128 | 298 | 29.8 | 2172 | 4211 |
+| vLLM | 4096 | 8 | 2444 | 38.1 | 124 | 3672 |
+| SGLang | 4096 | 8 | 131 | 20.9 | 367 | 157 |
+| vLLM | 4096 | 128 | 32134 | 262 | 159 | 66509 |
+| SGLang | 4096 | 128 | 1081 | 32.1 | 1989 | 5363 |
+| vLLM | 8192 | 8 | 4505 | 0 | 0.75 | 7587 |
+| SGLang | 8192 | 8 | 219 | 20.3 | 365 | 268 |
+| vLLM | 8192 | 128 | 73174 | 0 | 0.85 | 136792 |
+| SGLang | 8192 | 128 | 2039 | 45.1 | 1426 | 8259 |
+
+**Core Findings**
+
+- At short contexts (512 tokens), both engines deliver comparable single-request performance, but SGLang achieves substantially lower TTFT and higher aggregate throughput as concurrency increases.
+
+- The performance gap widens dramatically as context length grows. At 4096-token prompts and concurrency 128, SGLang delivers 1989 tok/s versus 159 tok/s for vLLM while reducing TTFT from 32.1 s to 1.1 s.
+
+- The most significant result appears **at 8192-token context length.** **Under concurrency 128, vLLM throughput falls to 0.85 tok/s with 73 s TTFT and 137 s P95 latency, whereas SGLang maintains 1426 tok/s with 2.0 s TTFT and 8.3 s P95 latency.**
+
+- The data suggests vLLM becomes KV-memory constrained at long contexts, reaching ~99% KV cache utilization by 4096–8192 tokens. SGLang continues to scale under the same workload, indicating substantially more efficient long-context serving behavior on a single A100.
