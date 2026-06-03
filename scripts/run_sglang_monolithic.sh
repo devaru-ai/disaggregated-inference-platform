@@ -90,4 +90,4 @@ for CONTEXT in "${CONTEXT_LENGTHS[@]}"; do
     done
 done
 
-echo "🎉 PIPELINE COMPLETE."
+echo "PIPELINE COMPLETE."
