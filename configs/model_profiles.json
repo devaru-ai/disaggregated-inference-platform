@@ -1,0 +1,36 @@
+{
+  "models": {
+    "llama-3-8b-dense": {
+      "hf_path": "meta-llama/Meta-Llama-3-8B-Instruct",
+      "tensor_parallel_size": 1,
+      "expert_parallel_size": 1,
+      "dtype": "bfloat16",
+      "architecture_type": "dense",
+      "gpu_memory_utilization": 0.90
+    },
+    "qwen-14b-dense": {
+      "hf_path": "Qwen/Qwen1.5-14B-Chat",
+      "tensor_parallel_size": 1,
+      "expert_parallel_size": 1,
+      "dtype": "bfloat16",
+      "architecture_type": "dense",
+      "gpu_memory_utilization": 0.90
+    },
+    "llama-3-70b-dense": {
+      "hf_path": "meta-llama/Meta-Llama-3-70B-Instruct",
+      "tensor_parallel_size": 2,
+      "expert_parallel_size": 1,
+      "dtype": "bfloat16",
+      "architecture_type": "dense",
+      "gpu_memory_utilization": 0.95
+    },
+    "mixtral-8x7b-moe": {
+      "hf_path": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+      "tensor_parallel_size": 1,
+      "expert_parallel_size": 4,
+      "dtype": "bfloat16",
+      "architecture_type": "moe",
+      "gpu_memory_utilization": 0.90
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "topologies": {
+    "monolithic_baseline_a100": {
+      "prefill_node": "A100",
+      "decode_node": "A100",
+      "execution_split": "none",
+      "routing": "local_memory",
+      "transport": "pcie"
+    },
+    "monolithic_baseline_h100": {
+      "prefill_node": "H100",
+      "decode_node": "H100",
+      "execution_split": "none",
+      "routing": "local_memory",
+      "transport": "pcie",
+      "hardware_optimization": "fp8_transformer_engine"
+    },
+    "role_based_proxy": {
+      "frontend_node": "CPU_Gateway",
+      "backend_node": "A100",
+      "execution_split": "full_forward_pass",
+      "routing": "prompt_forwarding",
+      "transport": "http_sse"
+    },
+    "phase_disaggregated_homogeneous_a100": {
+      "prefill_node": "A100",
+      "decode_node": "A100",
+      "execution_split": "prefill_decode",
+      "routing": "kv_transfer",
+      "transport": "nccl_rpc"
+    },
+    "phase_disaggregated_heterogeneous": {
+      "prefill_node": "A100",
+      "decode_node": "H100",
+      "execution_split": "prefill_decode",
+      "routing": "kv_transfer",
+      "transport": "nccl_rpc",
+      "hardware_optimization": "fp8_transformer_engine_on_decode"
+    },
+    "moe_expert_parallelism_4x": {
+      "cluster_nodes": ["A100", "A100", "A100", "A100"],
+      "execution_split": "expert_routing",
+      "routing": "all_to_all_shuffle",
+      "transport": "nvlink"
+    }
+  },
+  "default_model": "meta-llama/Meta-Llama-3-8B-Instruct"
+}
