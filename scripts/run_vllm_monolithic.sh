@@ -161,5 +161,5 @@ for MODEL in "${MODELS[@]}"; do
 done
 
 echo
-echo "🎉 ALL BENCHMARK SWEEPS COMPLETE."
+echo "ALL BENCHMARK SWEEPS COMPLETE."
 
