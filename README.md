@@ -8,18 +8,20 @@ This project studies model serving performance under heterogeneous system constr
 
 # Key Findings
 
-### 1. Long-context performance depends heavily on the serving engine
-At 8192-token prompts and 128 concurrent requests, vLLM nearly stopped making progress while SGLang maintained high throughput.
-- vLLM: 0.85 tok/s, 73s TTFT, 137s P95
-- SGLang: 1,426 tok/s, 2.0s TTFT, 8.3s P95
-This resulted in a ~1,676× throughput difference on identical hardware.
+### 1. Prefix caching eliminates redundant prefill cost and dominates long-context serving performance
 
+- At 8192-token prompts and 128 concurrent requests, vLLM recomputes the full prompt for every request.
+- SGLang's RadixAttention caches the prompt KV state after the first request and reuses it across all subsequent requests sharing the same prefix, eliminating prefill cost for cache hits.
+- Under this workload, where all concurrent requests share an identical prompt, this produced a ~1,676× throughput difference representing the upper bound of prefix caching advantage. (vLLM: 0.85 tok/s, 73s TTFT, 137s P95; SGLang: 1,426 tok/s, 2.0s TTFT, 8.3s P95)
+
+  
 ### 2. Moving KV cache can become as expensive as generating tokens
 In phase-disaggregated inference, the system eventually spends as much time transferring KV cache between GPUs as it spends generating new tokens.
 At 2048-token context and concurrency 8:
 - Token generation: ~515 ms/token
 - KV transfer: ~511–566 ms
-Once transfer time matches compute time, faster kernels or GPUs provide limited benefit unless the interconnect layer is improved.
+
+Once transfer time matches compute time, compute-side optimizations alone provide diminishing returns without a corresponding improvement in the interconnect layer.
 
 ### 3. Long prompts exhaust GPU memory faster than additional users
 Increasing concurrency improves throughput only up to a point. Long contexts are a much stronger scaling constraint because they rapidly consume KV-cache memory.
@@ -27,7 +29,14 @@ On a single A100:
 - Throughput remained healthy at 512-token contexts
 - Performance degraded sharply at 4096 tokens
 - At 8192 tokens, throughput collapsed to <1 tok/s
+
 This indicates that KV-cache capacity, rather than concurrency, becomes the dominant bottleneck for long-context serving.
+
+### 4. Model size accelerates KV cache exhaustion more than concurrency
+
+- At 4096-token context on a single A100, Qwen 1.5-14B saturates KV cache at concurrency 32 while Llama 3-8B doesn't saturate until concurrency 128, a 4× difference in effective serving headroom driven entirely by model size.
+- Beyond that threshold, throughput becomes insensitive to additional requests for both models, confirming KV cache capacity as the binding constraint at scale.
+
 
 ## Evaluated Architectures
  
@@ -61,9 +70,11 @@ This indicates that KV-cache capacity, rather than concurrency, becomes the domi
 
 - The performance gap widens dramatically as context length grows. At 4096-token prompts and concurrency 128, SGLang delivers 1989 tok/s versus 159 tok/s for vLLM while reducing TTFT from 32.1 s to 1.1 s.
 
-- The largest performance gap appears **at 8192-token context and concurrency 128. vLLM throughput collapses to 0.85 tok/s with 73 s TTFT and 137 s P95 latency, while SGLang maintains 1426 tok/s with 2.0 s TTFT and 8.3 s P95 latency, a ~1676× throughput advantage on identical hardware.**
+- The largest performance gap appears **at 8192-token context and concurrency 128. vLLM throughput collapses to 0.85 tok/s with 73 s TTFT and 137 s P95 latency, while SGLang maintains 1426 tok/s with 2.0 s TTFT and 8.3 s P95 latency, a ~1676× throughput advantage under maximum cache reuse conditions on identical hardware.**
 
 - The results suggest vLLM becomes KV-memory constrained at long contexts, with KV-cache utilization approaching saturation (~99%) between 4096 and 8192 tokens. SGLang maintains high throughput under the same workload, indicating significantly more efficient long-context serving on identical hardware.
+
+**Note:** SGLang's gains are maximized here because all concurrent requests share an identical prompt, representing near-100% cache hit rate. Production gains will vary based on system prompt reuse patterns across requests.
 
 # 2. Monolithic (Coupled) Inference
 
@@ -194,7 +205,7 @@ This indicates that KV-cache capacity, rather than concurrency, becomes the domi
 -  At this point, system performance becomes increasingly constrained by interconnect overhead, and further compute-side optimization yields diminishing returns unless the transfer layer is improved.
 
 # 4. Role-Based Disaggregated Inference
-Admission-controlled routing with circuit breaking separates request intake from GPU execution, enforcing backpressure via semaphore and GPU admission gates to shed load under burst concurrency.
+Admission-controlled routing with circuit breaking separates request intake from GPU execution, enforcing backpressure via semaphore and GPU admission gates to shed load under burst concurrency, trading raw acceptance rate for bounded tail latency and predictable execution time.
 
 | Total Requests | Successful (200) | Rejected (503) | Throughput (req/s) |
 |---------------:|-----------------:|---------------:|-------------------:|
@@ -210,7 +221,7 @@ This design prioritizes predictable latency and bounded GPU execution over unres
  
 Initial experiments using a public tunneling layer (Ngrok) to route inference to a T4 edge worker revealed batching inefficiencies under network jitter. Despite sustained request pressure, the worker GPU reached only ~40% SM utilization, while the A100 orchestrator was largely idle — a network-induced batching breakdown (drip-feed effect) where jitter prevents stable decode/prefill aggregation.
 
-Under identical workloads, the monolithic A100 achieved 477 tok/s at 123 ms TTFT, whereas the disaggregated topology collapsed to 32 tok/s at 1008 ms — a ~15× throughput drop primarily driven by network overhead.
+Under identical workloads, the monolithic A100 achieved 477 tok/s at 123 ms TTFT, whereas the disaggregated topology collapsed to 32 tok/s at 1008 ms — a ~15× throughput drop driven by network overhead and the drip-feed effect rather than raw compute capacity, as evidenced by the T4's 40% SM utilization.
  
 | Architecture Role | Hardware | Test Batch Size | VRAM Allocation | SM Compute Peak | Primary Bottleneck |
 | :--- | :--- | :--- | :--- | :--- | :--- |
