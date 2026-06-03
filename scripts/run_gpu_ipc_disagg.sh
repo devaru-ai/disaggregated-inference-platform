@@ -33,4 +33,4 @@ for MODEL in "${MODELS[@]}"; do
     # Cooldown to ensure VRAM is fully reclaimed by PyTorch
     sleep 10
 done
-echo "🎉 FULL MULTI-MODEL PROTOTYPE PIPELINE COMPLETE"
+echo "PHASE DISAGGREGATED BENCHMARKS COMPLETED"
