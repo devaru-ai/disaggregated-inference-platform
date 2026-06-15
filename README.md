@@ -12,8 +12,7 @@ This project studies model serving performance under heterogeneous system constr
 
 - At 8192-token prompts and 128 concurrent requests, vLLM recomputes the full prompt for every request.
 - SGLang's RadixAttention caches the prompt KV state after the first request and reuses it across all subsequent requests sharing the same prefix, eliminating prefill cost for cache hits.
-- Under this workload, where all concurrent requests share an identical prompt, this produced a ~1,676× throughput difference representing the upper bound of prefix caching advantage. (vLLM: 0.85 tok/s, 73s TTFT, 137s P95; SGLang: 1,426 tok/s, 2.0s TTFT, 8.3s P95)
-
+- Without prefix caching, vLLM recomputes the full 8192-token prompt for every request, collapsing throughput to 0.85 tok/s. SGLang's RadixAttention eliminates this cost on cache hits, sustaining 1426 tok/s on identical hardware. The observed gap reflects the cost of redundant prefill computation (vLLM: 0.85 tok/s, 73s TTFT, 137s P95; SGLang: 1,426 tok/s, 2.0s TTFT, 8.3s P95)
   
 ### 2. Moving KV cache can become as expensive as generating tokens
 In phase-disaggregated inference, the system eventually spends as much time transferring KV cache between GPUs as it spends generating new tokens.
